@@ -1,16 +1,16 @@
 # LED Controllers Makefile
 # 
-# 交叉编译示例:
-#   make CROSS_COMPILE=aarch64-linux-gnu-
-#   make CROSS_COMPILE=aarch64-linux-gnu- SYSROOT=/path/to/sysroot
+# 编译方式:
+#   make                                    # 本地编译
+#   make CC=/path/to/aarch64-linux-gnu-gcc SYSROOT=/path/to/sysroot  # 交叉编译
 #
-# 本地编译:
-#   make
+# 示例 (使用 Linaro 工具链):
+#   make CC=/opt/toolchains/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-gcc \
+#        SYSROOT=/home/lcdyk/cross-build/sysroot
 
 # 编译器配置
-CROSS_COMPILE ?=
-CC = $(CROSS_COMPILE)gcc
-STRIP = $(CROSS_COMPILE)strip
+CC ?= gcc
+STRIP = $(dir $(CC))$(notdir $(patsubst %gcc,%strip,$(CC)))
 
 # sysroot (交叉编译时可选)
 SYSROOT ?=
