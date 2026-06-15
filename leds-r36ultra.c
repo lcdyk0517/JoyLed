@@ -34,8 +34,14 @@
 #include <linux/delay.h>
 #include <linux/leds.h>
 #include <linux/interrupt.h>
+#include <linux/timer.h>
 
 #define DRIVER_NAME "r36ultra-led"
+
+/* 硬件刷新周期 - LED 控制器非锁存，需定时重发
+ * 原始 ASM 使用 interval=0x200000，这里取 2 秒
+ */
+#define REFRESH_INTERVAL    (HZ * 2)
 
 /* 脉冲时序参数 - 基于逆向工程分析
  * 原始驱动参数计算: usecs = param / 4295
@@ -81,6 +87,7 @@ struct r36ultra_led_priv {
     int irq_num;
     struct led_classdev led;
     int current_mode;
+    struct timer_list refresh_timer;
 };
 
 /*
@@ -141,6 +148,22 @@ static void send_pulse_count(int pulse_gpio, int pulse_count)
 }
 
 /*
+ * refresh_timer_cb - 定时刷新 LED 状态
+ * 
+ * LED 控制器非锁存，需定时重发脉冲以维持显示。
+ * 原始 ASM 0x7a9038 设定了周期性定时器，回调为 brightness_set。
+ */
+static void refresh_timer_cb(struct timer_list *t)
+{
+    struct r36ultra_led_priv *priv = from_timer(priv, t, refresh_timer);
+
+    if (priv->current_mode > 0)
+        send_pulse_count(priv->pulse_gpio, priv->current_mode);
+
+    mod_timer(&priv->refresh_timer, jiffies + REFRESH_INTERVAL);
+}
+
+/*
  * r36ultra_led_set - 设置 LED 亮度 (映射到模式)
  * @led_cdev: LED 类设备指针
  * @brightness: 亮度值 (0-255)
@@ -185,10 +208,8 @@ static void r36ultra_led_set(struct led_classdev *led_cdev,
         target_mode = MODE_RAINBOW;
     }
     
-    if (target_mode != priv->current_mode) {
-        send_pulse_count(priv->pulse_gpio, target_mode);
-        priv->current_mode = target_mode;
-    }
+    send_pulse_count(priv->pulse_gpio, target_mode);
+    priv->current_mode = target_mode;
 }
 
 /* 获取当前 LED 状态 */
@@ -339,17 +360,22 @@ static int r36ultra_led_probe(struct platform_device *pdev)
     send_pulse_count(priv->pulse_gpio, 11);
     priv->current_mode = 11;
     
+    /* 启动定时刷新 - LED 控制器需周期性重发 */
+    timer_setup(&priv->refresh_timer, refresh_timer_cb, 0);
+    mod_timer(&priv->refresh_timer, jiffies + REFRESH_INTERVAL);
+    
     dev_info(dev, "R36Ultra LED 驱动加载完成 (pulse_gpio=%d)\n", priv->pulse_gpio);
     return 0;
 }
 
 /* 驱动卸载时关闭 LED */
-static int r36ultra_led_remove(struct platform_device *pdev)
+static void r36ultra_led_remove(struct platform_device *pdev)
 {
     struct r36ultra_led_priv *priv = platform_get_drvdata(pdev);
-    if (priv)
+    if (priv) {
+        del_timer_sync(&priv->refresh_timer);
         send_pulse_count(priv->pulse_gpio, MODE_OFF);
-    return 0;
+    }
 }
 
 /* 系统关机时关闭 LED */
@@ -359,6 +385,32 @@ static void r36ultra_led_shutdown(struct platform_device *pdev)
     if (priv && gpio_is_valid(priv->pulse_gpio))
         send_pulse_count(priv->pulse_gpio, MODE_OFF);
 }
+
+static int __maybe_unused r36ultra_led_suspend(struct device *dev)
+{
+    struct r36ultra_led_priv *priv = dev_get_drvdata(dev);
+    if (priv)
+        del_timer_sync(&priv->refresh_timer);
+    return 0;
+}
+
+static int __maybe_unused r36ultra_led_resume(struct device *dev)
+{
+    struct r36ultra_led_priv *priv = dev_get_drvdata(dev);
+    if (priv) {
+        gpio_direction_output(priv->pulse_gpio, 0);
+        gpio_set_value(priv->pulse_gpio, 0);
+        msleep(50);
+        send_pulse_count(priv->pulse_gpio, 11);
+        msleep(100);
+        if (priv->current_mode > 0 && priv->current_mode != MODE_OFF)
+            send_pulse_count(priv->pulse_gpio, priv->current_mode);
+        mod_timer(&priv->refresh_timer, jiffies + REFRESH_INTERVAL);
+    }
+    return 0;
+}
+
+static SIMPLE_DEV_PM_OPS(r36ultra_led_pm, r36ultra_led_suspend, r36ultra_led_resume);
 
 static const struct of_device_id r36ultra_led_of_match[] = {
     { .compatible = "r36ultra,led" },
@@ -373,6 +425,7 @@ static struct platform_driver r36ultra_led_driver = {
     .driver = {
         .name           = DRIVER_NAME,
         .of_match_table = r36ultra_led_of_match,
+        .pm             = &r36ultra_led_pm,
     },
 };
 module_platform_driver(r36ultra_led_driver);
