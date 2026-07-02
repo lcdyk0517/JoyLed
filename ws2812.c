@@ -17,8 +17,10 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <math.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
+#include <linux/input.h>
 
 /* ==================== 配置参数 ==================== */
 
@@ -26,6 +28,7 @@
 #define LED_BUFFER_SIZE     (LED_COUNT * 24)
 #define SPI_SPEED           8000000
 #define SPI_DEVICE          "/dev/spidev1.0"
+#define JOYSTICK_DEVICE     "/dev/input/event2"
 
 /* 刷新间隔 (微秒) */
 #define REFRESH_FAST        10000
@@ -70,6 +73,36 @@ typedef struct {
 static void signal_handler(int sig) {
     (void)sig;
     quit = 1;
+}
+
+/* ==================== 摇杆接口函数 ==================== */
+
+static int joystick_open(const char *device) {
+    int fd = open(device, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        perror("Failed to open joystick device");
+        return -1;
+    }
+    return fd;
+}
+
+static int joystick_read(int fd, int *x, int *y) {
+    struct input_event ev;
+    static int axis_x = 0, axis_y = 0;
+    
+    while (read(fd, &ev, sizeof(ev)) == sizeof(ev)) {
+        if (ev.type == EV_ABS) {
+            if (ev.code == ABS_X) {
+                axis_x = ev.value;
+            } else if (ev.code == ABS_Y) {
+                axis_y = ev.value;
+            }
+        }
+    }
+    
+    *x = axis_x;
+    *y = axis_y;
+    return 0;
 }
 
 /* ==================== SPI 接口函数 ==================== */
@@ -317,10 +350,89 @@ static void effect_off(uint8_t *buffer) {
     ws2812_off(buffer);
 }
 
+/* 摇杆追光效果 */
+static void effect_joystick(uint8_t *buffer) {
+    int js_fd = joystick_open(JOYSTICK_DEVICE);
+    if (js_fd < 0) return;
+    
+    int x, y, center_x = 0, center_y = 0;
+    static const color_t colors[8] = {
+        {COLOR_RED}, {COLOR_YELLOW}, {COLOR_GREEN}, {COLOR_CYAN},
+        {COLOR_BLUE}, {COLOR_PURPLE}, {255, 127, 0}, {COLOR_WHITE}
+    };
+    int current_led = -1;
+    int trail[3] = {-1, -1, -1};
+    int breath = 0, breath_dir = 1;
+    uint8_t max_brightness = brightness_table[brightness_level];
+    uint8_t min_brightness = max_brightness / 3;
+    
+    for (int i = 0; i < 50; i++) {
+        joystick_read(js_fd, &x, &y);
+        center_x += x;
+        center_y += y;
+        usleep(1000);
+    }
+    center_x /= 50;
+    center_y /= 50;
+    
+    while (!quit) {
+        joystick_read(js_fd, &x, &y);
+        
+        int dx = x - center_x;
+        int dy = y - center_y;
+        int distance = dx * dx + dy * dy;
+        int deadzone = 300;
+        
+        if (distance > deadzone * deadzone) {
+            double angle = atan2(-dx, dy);
+            int led = (int)(angle * 4 / 3.14159 + 4.5) % 8;
+            
+            if (led != current_led) {
+                trail[2] = trail[1];
+                trail[1] = trail[0];
+                trail[0] = current_led;
+                current_led = led;
+            }
+        } else {
+            current_led = -1;
+            trail[0] = trail[1] = trail[2] = -1;
+        }
+        
+        ws2812_set_all(buffer, 0, 0, 0);
+        
+        if (current_led >= 0) {
+            breath += breath_dir * 8;
+            if (breath >= max_brightness) { breath = max_brightness; breath_dir = -1; }
+            if (breath <= min_brightness) { breath = min_brightness; breath_dir = 1; }
+            
+            uint8_t r = (uint16_t)colors[current_led].r * breath / 255;
+            uint8_t g = (uint16_t)colors[current_led].g * breath / 255;
+            uint8_t b = (uint16_t)colors[current_led].b * breath / 255;
+            ws2812_set_color(buffer, current_led, r, g, b);
+            
+            for (int i = 0; i < 3; i++) {
+                if (trail[i] >= 0 && trail[i] != current_led) {
+                    uint8_t dim = (max_brightness - i * 70) * breath / max_brightness;
+                    ws2812_set_color(buffer, trail[i], dim, dim, dim);
+                }
+            }
+        } else {
+            breath = min_brightness;
+            breath_dir = 1;
+        }
+        
+        refresh(buffer);
+        usleep(REFRESH_FAST);
+    }
+    
+    close(js_fd);
+}
+
 /* ==================== 模式映射表 ==================== */
 
 static const mode_entry_t mode_table[] = {
     {"OFF",                      effect_off},
+    {"Joystick",                 effect_joystick},
     {"Scrolling",                effect_scrolling},
     {"Breathing",                effect_breathing},
     {"Breathing_Red",            effect_breath_red},
@@ -345,7 +457,7 @@ static const mode_entry_t mode_table[] = {
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <mode> [brightness]\n", argv[0]);
-        printf("Modes: OFF, Scrolling, Breathing, Breathing_Red, Breathing_Green, "
+        printf("Modes: OFF, Joystick, Scrolling, Breathing, Breathing_Red, Breathing_Green, "
                "Breathing_Blue, Breathing_Blue_Red, Breathing_Green_Blue, "
                "Breathing_Red_Green, Breathing_Red_Green_Blue, Red_Green_Blue, "
                "Blue_Red, Blue, Green_Blue, Green, Red_Green, Red.\n");
