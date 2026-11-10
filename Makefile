@@ -15,7 +15,7 @@
 
 # 编译器配置
 CC ?= gcc
-STRIP = $(dir $(CC))$(notdir $(patsubst %gcc,%strip,$(CC)))
+STRIP = $(patsubst %gcc,%strip,$(CC))
 
 # sysroot (交叉编译时可选)
 SYSROOT ?=
@@ -27,7 +27,7 @@ endif
 CFLAGS += -Wall -O2
 
 # 目标文件
-TARGETS = ws2812 mcu_led
+TARGETS = ws2812 mcu_led ws2812_3562
 
 # 安装路径
 PREFIX ?= /usr/local
@@ -41,6 +41,10 @@ ws2812: ws2812.c
 	$(CC) $(CFLAGS) -o $@ $< -lm
 	$(STRIP) $@
 
+ws2812_3562: ws2812_3562.c
+	$(CC) $(CFLAGS) -o $@ $< -lm
+	$(STRIP) $@
+
 mcu_led: mcu_led.c
 	$(CC) $(CFLAGS) -o $@ $<
 	$(STRIP) $@
@@ -51,10 +55,12 @@ clean:
 install: $(TARGETS)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 ws2812 $(DESTDIR)$(BINDIR)/ws2812
+	install -m 755 ws2812_3562 $(DESTDIR)$(BINDIR)/ws2812_3562
 	install -m 755 mcu_led $(DESTDIR)$(BINDIR)/mcu_led
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/ws2812
+	rm -f $(DESTDIR)$(BINDIR)/ws2812_3562
 	rm -f $(DESTDIR)$(BINDIR)/mcu_led
 
 # ========================================
